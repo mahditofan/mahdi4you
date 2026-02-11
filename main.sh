@@ -4,16 +4,18 @@ clear
 set -e
 
 PROJECT="mahdi4you"
-VXLAN_ID=42
-VXLAN_IF="vxlan42"
+VXLAN_ID=100
+VXLAN_IF="vxlan100"
 VXLAN_PORT=4789
 MTU=1400
-NET_KHAREJ="10.50.50.1/24"
-NET_IRAN="10.50.50.2/24"
+
+# رنج استاندارد تمیز و بدون تداخل
+NET_KHAREJ="172.20.20.1/30"
+NET_IRAN="172.20.20.2/30"
 
 check_root() {
   if [[ $EUID -ne 0 ]]; then
-    echo "❌ Please run as root"
+    echo "❌ Run as root"
     exit 1
   fi
 }
@@ -45,11 +47,21 @@ install_vxlan() {
   ip link del $VXLAN_IF 2>/dev/null || true
 
   ip link add $VXLAN_IF type vxlan id $VXLAN_ID local $LOCAL_IP remote $PEER_IP dstport $VXLAN_PORT
+
   ip addr add $TUN_IP dev $VXLAN_IF
   ip link set $VXLAN_IF mtu $MTU
   ip link set $VXLAN_IF up
 
+  # Forward enable
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  # Disable rp_filter (مهم برای جلوگیری از قطع پینگ)
+  echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
+  echo 0 > /proc/sys/net/ipv4/conf/default/rp_filter
+
+  # Open VXLAN port
+  iptables -C INPUT -p udp --dport $VXLAN_PORT -j ACCEPT 2>/dev/null || \
+  iptables -A INPUT -p udp --dport $VXLAN_PORT -j ACCEPT
 
   if [[ "$ROLE" == "kharej" ]]; then
     iptables -t nat -C POSTROUTING -o $DEV -j MASQUERADE 2>/dev/null || \
@@ -62,14 +74,14 @@ install_vxlan() {
     iptables -A FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
   fi
 
-  echo "✅ VXLAN installed successfully"
+  echo "✅ VXLAN installed stable"
 }
 
 remove_vxlan() {
-  echo "---- Remove VXLAN ----"
   DEV=$(get_default_if)
 
   ip link del $VXLAN_IF 2>/dev/null || true
+  iptables -D INPUT -p udp --dport $VXLAN_PORT -j ACCEPT 2>/dev/null || true
   iptables -t nat -D POSTROUTING -o $DEV -j MASQUERADE 2>/dev/null || true
   iptables -D FORWARD -i $VXLAN_IF -o $DEV -j ACCEPT 2>/dev/null || true
   iptables -D FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
@@ -78,17 +90,16 @@ remove_vxlan() {
 }
 
 status_vxlan() {
-  echo "---- VXLAN Status ----"
   ip addr show $VXLAN_IF || echo "❌ VXLAN not found"
 }
 
 menu() {
   echo "=============================="
-  echo " $PROJECT VXLAN Installer"
+  echo " $PROJECT VXLAN Stable"
   echo "=============================="
   echo "1) Install VXLAN"
   echo "2) Remove VXLAN"
-  echo "3) VXLAN Status"
+  echo "3) Status"
   echo "0) Exit"
   echo "------------------------------"
   read -p "Select: " CHOICE
@@ -104,4 +115,3 @@ menu() {
 
 check_root
 menu
-
