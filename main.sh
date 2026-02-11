@@ -1,116 +1,73 @@
 #!/bin/bash
 
-RED="\e[31m"
-GREEN="\e[32m"
-YELLOW="\e[33m"
-CYAN="\e[36m"
-NC="\e[0m"
-
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-TABLE_ID=200
-TABLE_NAME="vxlan200"
-TUN_IF="vxlan0"
-SUBNET="10.200.200.0/30"
-
-enable_sysctl() {
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
-sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
-sysctl -w net.ipv4.conf.$INTERFACE.rp_filter=0 >/dev/null
-}
-
-add_routing_table() {
-grep -q "$TABLE_NAME" /etc/iproute2/rt_tables || echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
-}
 
 create_tunnel() {
 
-read -p "Enter Peer Public IP: " PEER
-read -p "Are you Server 1 or 2? (1/2): " SIDE
+read -p "Enter Peer Public IP: " PEER_IP
+read -p "Are you Server 1 (Kharej) or 2 (Iran)? (1/2): " SIDE
 
 if [ "$SIDE" == "1" ]; then
-    LOCAL="10.200.200.1"
-    REMOTE="10.200.200.2"
+    LOCAL_IP="10.77.77.1"
+    REMOTE_IP="10.77.77.2"
 else
-    LOCAL="10.200.200.2"
-    REMOTE="10.200.200.1"
+    LOCAL_IP="10.77.77.2"
+    REMOTE_IP="10.77.77.1"
 fi
 
-echo -e "${YELLOW}Cleaning old configs...${NC}"
-ip link del $TUN_IF 2>/dev/null
-ip rule del from $LOCAL table $TABLE_NAME 2>/dev/null
-ip route flush table $TABLE_NAME 2>/dev/null
+echo "Creating VXLAN..."
 
-echo -e "${GREEN}Creating VXLAN...${NC}"
+# پاک کردن قبلی اگر وجود داشت
+ip link del vxlan0 2>/dev/null
 
-ip link add $TUN_IF type vxlan id 200 remote $PEER dstport 4789 dev $INTERFACE
-ip addr add $LOCAL/30 dev $TUN_IF
-ip link set $TUN_IF mtu 1400
-ip link set $TUN_IF up
+# ساخت vxlan
+ip link add vxlan0 type vxlan id 77 remote $PEER_IP dstport 4789 dev $INTERFACE
 
-enable_sysctl
-add_routing_table
+# ست کردن آیپی
+ip addr add $LOCAL_IP/30 dev vxlan0
 
-# Route اصلی
-ip route add $SUBNET dev $TUN_IF
+# تنظیم MTU پایدار
+ip link set vxlan0 mtu 1400
+ip link set vxlan0 up
 
-# Policy Routing
-ip rule add from $LOCAL table $TABLE_NAME
-ip route add default dev $TUN_IF table $TABLE_NAME
+# تنظیمات سیستمی مهم
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
+echo 0 > /proc/sys/net/ipv4/conf/default/rp_filter
 
-# Firewall
+# باز کردن پورت
 iptables -I INPUT -p udp --dport 4789 -j ACCEPT
-iptables -I FORWARD -i $TUN_IF -j ACCEPT
-iptables -I FORWARD -o $TUN_IF -j ACCEPT
+iptables -I FORWARD -i vxlan0 -j ACCEPT
+iptables -I FORWARD -o vxlan0 -j ACCEPT
 
 echo ""
-echo -e "${GREEN}==============================${NC}"
-echo -e "${CYAN} VXLAN Pro Tunnel Ready ${NC}"
-echo -e "${GREEN}==============================${NC}"
-echo -e "Local IP  : $LOCAL"
-echo -e "Remote IP : $REMOTE"
+echo "Tunnel Created Successfully"
+echo "Local Tunnel IP: $LOCAL_IP"
+echo "Remote Tunnel IP: $REMOTE_IP"
 echo ""
-echo -e "${YELLOW}Test with:${NC} ping $REMOTE"
+echo "Test with: ping $REMOTE_IP"
 }
 
 delete_tunnel() {
-ip link del $TUN_IF 2>/dev/null
-ip rule del table $TABLE_NAME 2>/dev/null
-ip route flush table $TABLE_NAME 2>/dev/null
-iptables -D INPUT -p udp --dport 4789 -j ACCEPT 2>/dev/null
-echo -e "${RED}Tunnel Removed.${NC}"
-}
-
-status_tunnel() {
-echo -e "${CYAN}Interface:${NC}"
-ip addr show $TUN_IF 2>/dev/null
-echo ""
-echo -e "${CYAN}Rules:${NC}"
-ip rule | grep $TABLE_NAME
-echo ""
-echo -e "${CYAN}Routes:${NC}"
-ip route | grep $TUN_IF
+ip link del vxlan0 2>/dev/null
+echo "Tunnel Deleted"
 }
 
 while true; do
 clear
-echo -e "${GREEN}"
-echo "======================================"
-echo "       mahdi4you VXLAN Pro"
-echo "======================================"
-echo -e "${NC}"
+echo "==============================="
+echo "     mahdi4you VXLAN Stable"
+echo "==============================="
 echo "1) Create Tunnel"
 echo "2) Delete Tunnel"
-echo "3) Status"
-echo "4) Exit"
+echo "3) Exit"
 echo ""
-read -p "Choose: " OPT
+read -p "Choose: " OPTION
 
-case $OPT in
+case $OPTION in
 1) create_tunnel; read -p "Press Enter..." ;;
 2) delete_tunnel; read -p "Press Enter..." ;;
-3) status_tunnel; read -p "Press Enter..." ;;
-4) exit ;;
+3) exit ;;
 *) echo "Invalid"; sleep 2 ;;
 esac
 done
