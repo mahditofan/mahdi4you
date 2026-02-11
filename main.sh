@@ -4,104 +4,74 @@ GREEN="\033[1;32m"
 RED="\033[1;31m"
 NC="\033[0m"
 
-clear
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 
-install_packages() {
-    apt update -y
-    apt install -y strongswan strongswan-pki iproute2
+enable_sysctl() {
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
+echo 0 > /proc/sys/net/ipv4/conf/default/rp_filter
 }
 
-enable_ip_forward() {
-    echo 1 > /proc/sys/net/ipv4/ip_forward
-    sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-}
+create_tunnel() {
 
-setup_ipsec() {
-read -p "Enter Your Public IP: " my_ip
-read -p "Enter Peer Public IP: " peer_ip
-read -p "Enter Pre-Shared Key (PSK): " psk
+read -p "Enter Peer Public IP: " PEER_IP
+read -p "Are you Server 1 or 2? (1/2): " SIDE
 
-cat > /etc/ipsec.conf <<EOF
-config setup
-    charondebug="ike 1, knl 1, cfg 0"
+if [ "$SIDE" == "1" ]; then
+    LOCAL_TUN="100.64.0.1"
+    REMOTE_TUN="100.64.0.2"
+else
+    LOCAL_TUN="100.64.0.2"
+    REMOTE_TUN="100.64.0.1"
+fi
 
-conn geneve
-    keyexchange=ikev2
-    auto=start
-    left=$my_ip
-    leftid=$my_ip
-    leftsubnet=0.0.0.0/0
-    right=$peer_ip
-    rightid=$peer_ip
-    rightsubnet=0.0.0.0/0
-    ike=aes256-sha256-modp2048!
-    esp=aes256-sha256!
-EOF
+echo -e "${GREEN}Creating Geneve Tunnel...${NC}"
 
-cat > /etc/ipsec.secrets <<EOF
-$my_ip $peer_ip : PSK "$psk"
-EOF
-
-systemctl restart strongswan
-systemctl enable strongswan
-}
-
-setup_geneve() {
-read -p "Enter Peer Public IP: " peer_ip
-read -p "Enter Local Tunnel IP (Example 10.200.200.1): " local_tun
-read -p "Enter Remote Tunnel IP (Example 10.200.200.2): " remote_tun
-
-ip link add geneve42 type geneve id 42 remote $peer_ip dstport 6081
-ip addr add $local_tun/30 dev geneve42
-ip link set geneve42 mtu 1400
-ip link set geneve42 up
+ip link add gnv0 type geneve id 100 remote $PEER_IP dstport 6081 dev $INTERFACE
+ip addr add $LOCAL_TUN/30 dev gnv0
+ip link set gnv0 mtu 1380
+ip link set gnv0 up
 
 iptables -A INPUT -p udp --dport 6081 -j ACCEPT
-iptables -A FORWARD -i geneve42 -j ACCEPT
-iptables -A FORWARD -o geneve42 -j ACCEPT
+iptables -A FORWARD -i gnv0 -j ACCEPT
+iptables -A FORWARD -o gnv0 -j ACCEPT
 
-echo -e "${GREEN}Geneve Tunnel Created!${NC}"
+enable_sysctl
+
+echo -e "${GREEN}Tunnel Ready!${NC}"
+echo "Local Tunnel IP: $LOCAL_TUN"
+echo "Remote Tunnel IP: $REMOTE_TUN"
 }
 
-delete_all() {
-ip link del geneve42 2>/dev/null
-rm -f /etc/ipsec.conf
-rm -f /etc/ipsec.secrets
-systemctl restart strongswan
-echo -e "${RED}Tunnel Removed.${NC}"
+delete_tunnel() {
+ip link del gnv0 2>/dev/null
+iptables -D INPUT -p udp --dport 6081 -j ACCEPT 2>/dev/null
+echo -e "${RED}Tunnel Deleted.${NC}"
 }
 
 while true; do
 clear
 echo -e "${GREEN}"
 echo "======================================"
-echo "     mahdi4you Geneve + IPsec"
+echo "         mahdi4you Geneve Pro"
 echo "======================================"
 echo -e "${NC}"
-echo "1) Install & Setup IPsec"
-echo "2) Setup Geneve Tunnel"
-echo "3) Delete Tunnel"
-echo "4) Exit"
+echo "1) Create Tunnel"
+echo "2) Delete Tunnel"
+echo "3) Exit"
 echo ""
-read -p "Choose: " opt
+read -p "Choose: " OPTION
 
-case $opt in
+case $OPTION in
 1)
-install_packages
-enable_ip_forward
-setup_ipsec
+create_tunnel
 read -p "Press Enter..."
 ;;
 2)
-setup_geneve
+delete_tunnel
 read -p "Press Enter..."
 ;;
 3)
-delete_all
-read -p "Press Enter..."
-;;
-4)
 exit
 ;;
 *)
