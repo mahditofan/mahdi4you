@@ -1,116 +1,106 @@
 #!/bin/bash
 
-RED="\e[31m"
-GREEN="\e[32m"
-YELLOW="\e[33m"
-CYAN="\e[36m"
-NC="\e[0m"
-
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-TABLE_ID=200
-TABLE_NAME="vxlan200"
-TUN_IF="vxlan0"
-SUBNET="10.200.200.0/30"
-
-enable_sysctl() {
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
-sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
-sysctl -w net.ipv4.conf.$INTERFACE.rp_filter=0 >/dev/null
-}
-
-add_routing_table() {
-grep -q "$TABLE_NAME" /etc/iproute2/rt_tables || echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
-}
-
-create_tunnel() {
-
-read -p "Enter Peer Public IP: " PEER
-read -p "Are you Server 1 or 2? (1/2): " SIDE
-
-if [ "$SIDE" == "1" ]; then
-    LOCAL="10.200.200.1"
-    REMOTE="10.200.200.2"
-else
-    LOCAL="10.200.200.2"
-    REMOTE="10.200.200.1"
-fi
-
-echo -e "${YELLOW}Cleaning old configs...${NC}"
-ip link del $TUN_IF 2>/dev/null
-ip rule del from $LOCAL table $TABLE_NAME 2>/dev/null
-ip route flush table $TABLE_NAME 2>/dev/null
-
-echo -e "${GREEN}Creating VXLAN...${NC}"
-
-ip link add $TUN_IF type vxlan id 200 remote $PEER dstport 4789 dev $INTERFACE
-ip addr add $LOCAL/30 dev $TUN_IF
-ip link set $TUN_IF mtu 1400
-ip link set $TUN_IF up
-
-enable_sysctl
-add_routing_table
-
-# Route اصلی
-ip route add $SUBNET dev $TUN_IF
-
-# Policy Routing
-ip rule add from $LOCAL table $TABLE_NAME
-ip route add default dev $TUN_IF table $TABLE_NAME
-
-# Firewall
-iptables -I INPUT -p udp --dport 4789 -j ACCEPT
-iptables -I FORWARD -i $TUN_IF -j ACCEPT
-iptables -I FORWARD -o $TUN_IF -j ACCEPT
-
-echo ""
-echo -e "${GREEN}==============================${NC}"
-echo -e "${CYAN} VXLAN Pro Tunnel Ready ${NC}"
-echo -e "${GREEN}==============================${NC}"
-echo -e "Local IP  : $LOCAL"
-echo -e "Remote IP : $REMOTE"
-echo ""
-echo -e "${YELLOW}Test with:${NC} ping $REMOTE"
-}
-
-delete_tunnel() {
-ip link del $TUN_IF 2>/dev/null
-ip rule del table $TABLE_NAME 2>/dev/null
-ip route flush table $TABLE_NAME 2>/dev/null
-iptables -D INPUT -p udp --dport 4789 -j ACCEPT 2>/dev/null
-echo -e "${RED}Tunnel Removed.${NC}"
-}
-
-status_tunnel() {
-echo -e "${CYAN}Interface:${NC}"
-ip addr show $TUN_IF 2>/dev/null
-echo ""
-echo -e "${CYAN}Rules:${NC}"
-ip rule | grep $TABLE_NAME
-echo ""
-echo -e "${CYAN}Routes:${NC}"
-ip route | grep $TUN_IF
-}
-
-while true; do
 clear
-echo -e "${GREEN}"
-echo "======================================"
-echo "       mahdi4you VXLAN Pro"
-echo "======================================"
-echo -e "${NC}"
-echo "1) Create Tunnel"
-echo "2) Delete Tunnel"
-echo "3) Status"
-echo "4) Exit"
-echo ""
-read -p "Choose: " OPT
+set -e
 
-case $OPT in
-1) create_tunnel; read -p "Press Enter..." ;;
-2) delete_tunnel; read -p "Press Enter..." ;;
-3) status_tunnel; read -p "Press Enter..." ;;
-4) exit ;;
-*) echo "Invalid"; sleep 2 ;;
-esac
-done
+PROJECT="mahdi4you"
+VXLAN_ID=42
+VXLAN_IF="vxlan42"
+VXLAN_PORT=4789
+MTU=1400
+NET_KHAREJ="10.50.50.1/24"
+NET_IRAN="10.50.50.2/24"
+
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    echo "❌ Please run as root"
+    exit 1
+  fi
+}
+
+get_default_if() {
+  ip route | awk '/default/ {print $5}' | head -n1
+}
+
+install_vxlan() {
+  echo "---- VXLAN Install ----"
+  read -p "Server role (iran/kharej): " ROLE
+  read -p "Peer public IPv4: " PEER_IP
+  read -p "Network interface [auto]: " DEV
+  DEV=${DEV:-$(get_default_if)}
+
+  LOCAL_IP=$(ip addr show $DEV | awk '/inet /{print $2}' | cut -d/ -f1)
+
+  if [[ "$ROLE" == "kharej" ]]; then
+    TUN_IP=$NET_KHAREJ
+  elif [[ "$ROLE" == "iran" ]]; then
+    TUN_IP=$NET_IRAN
+  else
+    echo "❌ Invalid role"
+    exit 1
+  fi
+
+  modprobe vxlan
+
+  ip link del $VXLAN_IF 2>/dev/null || true
+
+  ip link add $VXLAN_IF type vxlan id $VXLAN_ID local $LOCAL_IP remote $PEER_IP dstport $VXLAN_PORT
+  ip addr add $TUN_IP dev $VXLAN_IF
+  ip link set $VXLAN_IF mtu $MTU
+  ip link set $VXLAN_IF up
+
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  if [[ "$ROLE" == "kharej" ]]; then
+    iptables -t nat -C POSTROUTING -o $DEV -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -o $DEV -j MASQUERADE
+
+    iptables -C FORWARD -i $VXLAN_IF -o $DEV -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i $VXLAN_IF -o $DEV -j ACCEPT
+
+    iptables -C FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
+  fi
+
+  echo "✅ VXLAN installed successfully"
+}
+
+remove_vxlan() {
+  echo "---- Remove VXLAN ----"
+  DEV=$(get_default_if)
+
+  ip link del $VXLAN_IF 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -o $DEV -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -i $VXLAN_IF -o $DEV -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+  echo "🗑 VXLAN removed"
+}
+
+status_vxlan() {
+  echo "---- VXLAN Status ----"
+  ip addr show $VXLAN_IF || echo "❌ VXLAN not found"
+}
+
+menu() {
+  echo "=============================="
+  echo " $PROJECT VXLAN Installer"
+  echo "=============================="
+  echo "1) Install VXLAN"
+  echo "2) Remove VXLAN"
+  echo "3) VXLAN Status"
+  echo "0) Exit"
+  echo "------------------------------"
+  read -p "Select: " CHOICE
+
+  case $CHOICE in
+    1) install_vxlan ;;
+    2) remove_vxlan ;;
+    3) status_vxlan ;;
+    0) exit 0 ;;
+    *) echo "Invalid option" ;;
+  esac
+}
+
+check_root
+menu
