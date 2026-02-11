@@ -1,106 +1,65 @@
 #!/bin/bash
+
 clear
-set -e
 
-PROJECT="mahdi4you-TCP"
-WG_IF="wg0"
-WG_PORT=51820
-VXLAN_IF="vxlan200"
-VXLAN_ID=200
-VXLAN_PORT=4789
-MTU=1380
+GREEN="\033[1;32m"
+RED="\033[1;31m"
+NC="\033[0m"
 
-check_root() {
- [ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
-}
+while true
+do
+clear
+echo -e "${GREEN}"
+echo "======================================"
+echo "        mahdi4you VXLAN Tunnel"
+echo "======================================"
+echo -e "${NC}"
+echo "1) Setup Tunnel"
+echo "2) Delete Tunnel"
+echo "3) Exit"
+echo ""
+read -p "Choose an option: " option
 
-install_all() {
+case $option in
 
-apt update -y
-apt install wireguard iproute2 iptables -y
+1)
+read -p "Enter Remote IP: " remote_ip
+read -p "Enter Local Tunnel IP (Example 10.10.10.1): " local_tun_ip
+read -p "Enter Remote Tunnel IP (Example 10.10.10.2): " remote_tun_ip
 
-echo "Server role (iran/kharej)"
-read ROLE
-read -p "Peer Public IP: " PEER
-read -p "Public Interface (eth0?): " DEV
-DEV=${DEV:-eth0}
+echo "Creating VXLAN..."
 
-WG_PRIV=$(wg genkey)
-WG_PUB=$(echo $WG_PRIV | wg pubkey)
+ip link add vxlan42 type vxlan id 42 dev eth0 remote $remote_ip dstport 4789
+ip addr add $local_tun_ip/24 dev vxlan42
+ip link set vxlan42 up
+ip link set vxlan42 mtu 1400
 
-echo "====== IMPORTANT ======"
-echo "Save this Public Key:"
-echo $WG_PUB
-echo "======================="
+echo 1 > /proc/sys/net/ipv4/ip_forward
 
-read -p "Enter Peer Public Key: " PEER_PUB
+iptables -A INPUT -p udp --dport 4789 -j ACCEPT
+iptables -A FORWARD -i vxlan42 -j ACCEPT
+iptables -A FORWARD -o vxlan42 -j ACCEPT
 
-if [ "$ROLE" = "kharej" ]; then
-  WG_IP="10.200.200.1/30"
-  PEER_WG="10.200.200.2/32"
-  VX_IP="172.30.30.1/30"
-else
-  WG_IP="10.200.200.2/30"
-  PEER_WG="10.200.200.1/32"
-  VX_IP="172.30.30.2/30"
-fi
+echo -e "${GREEN}Tunnel Created Successfully!${NC}"
+sleep 3
+;;
 
-cat > /etc/wireguard/$WG_IF.conf <<EOF
-[Interface]
-PrivateKey = $WG_PRIV
-Address = $WG_IP
-ListenPort = $WG_PORT
+2)
+echo "Deleting VXLAN..."
+ip link del vxlan42
+iptables -D INPUT -p udp --dport 4789 -j ACCEPT
+echo -e "${RED}Tunnel Deleted!${NC}"
+sleep 2
+;;
 
-[Peer]
-PublicKey = $PEER_PUB
-AllowedIPs = $PEER_WG
-Endpoint = $PEER:$WG_PORT
-PersistentKeepalive = 25
-EOF
+3)
+exit
+;;
 
-sysctl -w net.ipv4.ip_forward=1
+*)
+echo "Invalid option"
+sleep 2
+;;
 
-wg-quick up $WG_IF
-
-ip link add $VXLAN_IF type vxlan id $VXLAN_ID local ${WG_IP%/*} remote ${PEER_WG%/*} dev $WG_IF dstport $VXLAN_PORT
-ip addr add $VX_IP dev $VXLAN_IF
-ip link set $VXLAN_IF mtu $MTU
-ip link set $VXLAN_IF up
-
-iptables -A INPUT -p udp --dport $WG_PORT -j ACCEPT
-
-if [ "$ROLE" = "kharej" ]; then
-  iptables -t nat -A POSTROUTING -o $DEV -j MASQUERADE
-  iptables -A FORWARD -i $VXLAN_IF -o $DEV -j ACCEPT
-  iptables -A FORWARD -i $DEV -o $VXLAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
-fi
-
-echo "✅ Installed successfully"
-}
-
-remove_all() {
-wg-quick down $WG_IF 2>/dev/null || true
-ip link del $VXLAN_IF 2>/dev/null || true
-rm -f /etc/wireguard/$WG_IF.conf
-echo "Removed."
-}
-
-menu() {
-echo "======================="
-echo " $PROJECT "
-echo "======================="
-echo "1) Install"
-echo "2) Remove"
-echo "0) Exit"
-read -p "Choose: " CH
-
-case $CH in
-1) install_all ;;
-2) remove_all ;;
-0) exit ;;
-*) echo "Invalid" ;;
 esac
-}
-
-check_root
-menu
+done
