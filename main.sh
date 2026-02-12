@@ -7,39 +7,20 @@ CYAN="\e[36m"
 NC="\e[0m"
 
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+TABLE_ID=200
+TABLE_NAME="vxlan200"
 TUN_IF="vxlan0"
-SERVICE_FILE="/etc/systemd/system/mahdi4you-vxlan.service"
+SUBNET="10.200.200.0/30"
 
-create_service() {
+enable_sysctl() {
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf.$INTERFACE.rp_filter=0 >/dev/null
+}
 
-cat > $SERVICE_FILE <<EOF
-[Unit]
-Description=mahdi4you VXLAN Tunnel
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c '
-ip link add $TUN_IF type vxlan id 200 remote $PEER dstport 4789 dev $INTERFACE;
-ip addr add $LOCAL/30 dev $TUN_IF;
-ip link set $TUN_IF mtu 1400;
-ip link set $TUN_IF up;
-ip route add 10.200.200.0/30 dev $TUN_IF;
-sysctl -w net.ipv4.ip_forward=1;
-sysctl -w net.ipv4.conf.all.rp_filter=0;
-iptables -I INPUT -p udp --dport 4789 -j ACCEPT;
-iptables -I FORWARD -i $TUN_IF -j ACCEPT;
-iptables -I FORWARD -o $TUN_IF -j ACCEPT;
-'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable mahdi4you-vxlan
-systemctl start mahdi4you-vxlan
+add_routing_table() {
+grep -q "$TABLE_NAME" /etc/iproute2/rt_tables || echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
 }
 
 create_tunnel() {
@@ -55,38 +36,67 @@ else
     REMOTE="10.200.200.1"
 fi
 
+echo -e "${YELLOW}Cleaning old configs...${NC}"
 ip link del $TUN_IF 2>/dev/null
+ip rule del from $LOCAL table $TABLE_NAME 2>/dev/null
+ip route flush table $TABLE_NAME 2>/dev/null
 
-create_service
+echo -e "${GREEN}Creating VXLAN...${NC}"
+
+ip link add $TUN_IF type vxlan id 200 remote $PEER dstport 4789 dev $INTERFACE
+ip addr add $LOCAL/30 dev $TUN_IF
+ip link set $TUN_IF mtu 1400
+ip link set $TUN_IF up
+
+enable_sysctl
+add_routing_table
+
+# Route اصلی
+ip route add $SUBNET dev $TUN_IF
+
+# Policy Routing
+ip rule add from $LOCAL table $TABLE_NAME
+ip route add default dev $TUN_IF table $TABLE_NAME
+
+# Firewall
+iptables -I INPUT -p udp --dport 4789 -j ACCEPT
+iptables -I FORWARD -i $TUN_IF -j ACCEPT
+iptables -I FORWARD -o $TUN_IF -j ACCEPT
 
 echo ""
-echo -e "${GREEN}Tunnel Created & Persistent Enabled${NC}"
-echo "Local IP: $LOCAL"
-echo "Remote IP: $REMOTE"
+echo -e "${GREEN}==============================${NC}"
+echo -e "${CYAN} VXLAN Pro Tunnel Ready ${NC}"
+echo -e "${GREEN}==============================${NC}"
+echo -e "Local IP  : $LOCAL"
+echo -e "Remote IP : $REMOTE"
 echo ""
-echo "After reboot it will stay active."
+echo -e "${YELLOW}Test with:${NC} ping $REMOTE"
 }
 
 delete_tunnel() {
-systemctl stop mahdi4you-vxlan 2>/dev/null
-systemctl disable mahdi4you-vxlan 2>/dev/null
-rm -f $SERVICE_FILE
-systemctl daemon-reload
 ip link del $TUN_IF 2>/dev/null
-echo -e "${RED}Tunnel Fully Removed.${NC}"
+ip rule del table $TABLE_NAME 2>/dev/null
+ip route flush table $TABLE_NAME 2>/dev/null
+iptables -D INPUT -p udp --dport 4789 -j ACCEPT 2>/dev/null
+echo -e "${RED}Tunnel Removed.${NC}"
 }
 
 status_tunnel() {
-systemctl status mahdi4you-vxlan --no-pager
-echo ""
+echo -e "${CYAN}Interface:${NC}"
 ip addr show $TUN_IF 2>/dev/null
+echo ""
+echo -e "${CYAN}Rules:${NC}"
+ip rule | grep $TABLE_NAME
+echo ""
+echo -e "${CYAN}Routes:${NC}"
+ip route | grep $TUN_IF
 }
 
 while true; do
 clear
 echo -e "${GREEN}"
 echo "======================================"
-echo "     mahdi4you VXLAN Persistent"
+echo "       mahdi4you VXLAN Pro"
 echo "======================================"
 echo -e "${NC}"
 echo "1) Create Tunnel"
